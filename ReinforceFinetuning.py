@@ -2,50 +2,82 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adam
-from math_verify import parse, verify
-from torch.optim import Adam
 from tqdm import tqdm
 import os
 import re
 import time
+
 from datasets import load_dataset
-from Supervised import tokenizer, make_conversation
 from transformers import TrainingArguments, Trainer, AutoTokenizer, AutoModelForCausalLM
 from peft import LoraConfig, get_peft_model
 
+from math_verify import parse, verify
+from Supervised import tokenizer, make_conversation
 
-SYSTEM_PROMPT = (
-    "A conversation between User and Assistant. The user asks a question, "
-    "and the Assistant solves it. The assistant first thinks about the reasoning "
-    "process in the mind and then provides the user with the answer. "
-    "The reasoning process and answer are enclosed within <think> </think> and "
-    "<answer> </answer> tags."
-)
+
+class TrainingConfig:
+
+    DATASET_ID = 'AI-MO/NuminaMath-TIR'
+    TRAIN_SPLIT = 'train[:5%]'
+    TEST_SPLIT = 'test[:20%]'
+    
+    MODEL_PATH = "/home/neuroali/pytorch_projects/pytorch_cuda_env/RL-LLM/Qwen2-0.5B-SFT-full"
+    OUTPUT_DIR = "/home/neuroali/pytorch_projects/pytorch_cuda_env/RL-LLM/Qwen2-0.5B-REINFORCE-trained"
+    
+    LEARNING_RATE = 1e-5
+    BATCH_SIZE = 1
+    NUM_EPOCHS = 1
+    MAX_NEW_TOKENS = 512
+    TEMPERATURE = 0.7
+    
+    LORA_CONFIG = LoraConfig(
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.1,
+        bias="none",
+        task_type="CAUSAL_LM"
+    )
+    
+    SYSTEM_PROMPT = (
+        "A conversation between User and Assistant. The user asks a question, "
+        "and the Assistant solves it. The assistant first thinks about the reasoning "
+        "process in the mind and then provides the user with the answer. "
+        "The reasoning process and answer are enclosed within <think> </think> and "
+        "<answer> </answer> tags."
+    )
+
+
 
 def make_conversation(example):
     return {
         "prompt": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": TrainingConfig.SYSTEM_PROMPT},
             {"role": "user", "content": example["problem"]},
         ],
         "solution": example["solution"]  
     }
-dataset_id = 'AI-MO/NuminaMath-TIR'
-train_dataset, test_dataset = load_dataset(dataset_id, split=['train[:5%]', 'test[:20%]'])  
-train_dataset = train_dataset.map(make_conversation)
-test_dataset = test_dataset.map(make_conversation)
-train_dataset = train_dataset.remove_columns(['messages', 'problem'])
-test_dataset = test_dataset.remove_columns(['messages', 'problem'])
 
-lora_config = LoraConfig(
-    r=16,
-    lora_alpha=32,
-    lora_dropout=0.1,
-    bias="none",
-    task_type="CAUSAL_LM"
-)
+def load_and_process_dataset():
+
+    train_dataset, test_dataset = load_dataset(
+        TrainingConfig.DATASET_ID, 
+        split=[TrainingConfig.TRAIN_SPLIT, TrainingConfig.TEST_SPLIT]
+    )
+    
+    train_dataset = train_dataset.map(make_conversation)
+    test_dataset = test_dataset.map(make_conversation)
+    
+    train_dataset = train_dataset.remove_columns(['messages', 'problem'])
+    test_dataset = test_dataset.remove_columns(['messages', 'problem'])
+    
+    print(f"Train dataset size: {len(train_dataset)}")
+    print(f"Test dataset size: {len(test_dataset)}")
+    
+    return train_dataset, test_dataset
+
 
 def format_reward(completions, **kwargs):
+
     rewards_list = []
     pattern = r"<think>.*?</think>.*?<answer>.*?</answer>"
 
@@ -76,10 +108,11 @@ def accuracy_reward(completions, **kwargs):
     
     return rewards
 
-def generate_with_reasoning(model, tokenizer, prompt):
+
+
+def reasoning_traces(model, tokenizer, prompt):
 
     prompt_text = tokenizer.apply_chat_template(prompt, tokenize=False)
-
     inputs = tokenizer(prompt_text, return_tensors="pt", padding=True, truncation=True).to(model.device)
 
     start_time = time.time()
@@ -89,7 +122,7 @@ def generate_with_reasoning(model, tokenizer, prompt):
             attention_mask=inputs["attention_mask"],
             max_new_tokens=128,
             do_sample=True,
-            temperature=0.7,
+            temperature=TrainingConfig.TEMPERATURE,
             pad_token_id=tokenizer.pad_token_id
         )
     end_time = time.time()
@@ -99,25 +132,53 @@ def generate_with_reasoning(model, tokenizer, prompt):
     generated_text = full_text[len(input_text):].strip()
 
     inference_duration = end_time - start_time
-
     num_input_tokens = inputs["input_ids"].shape[1]
     num_generated_tokens = output_ids.shape[1] - num_input_tokens
 
     return generated_text, inference_duration, num_generated_tokens
 
+def setup_model_and_tokenizer():
+
+    model = AutoModelForCausalLM.from_pretrained(
+        TrainingConfig.MODEL_PATH,
+        torch_dtype=torch.bfloat16,  
+        device_map="auto",          
+        trust_remote_code=True       
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(TrainingConfig.MODEL_PATH)
+    model = model.to("cuda")
+    model = get_peft_model(model, TrainingConfig.LORA_CONFIG)
+    
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    print(f"Total trainable parameters: {model.get_nb_trainable_parameters()}")
+    
+    return model, tokenizer
+
+
+
 class REINFORCETrainer:
-    def __init__(self, model, tokenizer, reward_funcs, train_dataset, lr=1e-5, batch_size=8, num_epochs=10):
+    
+    def __init__(self, model, tokenizer, reward_funcs, train_dataset, test_dataset, config=None):
         self.model = model
         self.tokenizer = tokenizer
         self.reward_funcs = reward_funcs
         self.train_dataset = train_dataset
-        self.lr = lr
-        self.batch_size = batch_size
-        self.num_epochs = num_epochs
-
-        self.optimizer = Adam(model.parameters(), lr=self.lr)
+        self.test_dataset = test_dataset
+        self.config = config or TrainingConfig()
+        
+        self.optimizer = Adam(model.parameters(), lr=self.config.LEARNING_RATE)
+        
+        print(f"  Learning rate: {self.config.LEARNING_RATE}")
+        print(f"  Batch size: {self.config.BATCH_SIZE}")
+        print(f"  Epochs: {self.config.NUM_EPOCHS}")
+        print(f"  Max new tokens: {self.config.MAX_NEW_TOKENS}")
 
     def compute_rewards(self, batch):
+
         prompt = batch["prompt"]  
         solution = batch["solution"]  
         
@@ -125,16 +186,15 @@ class REINFORCETrainer:
         solutions = [solution] 
         
         prompt_texts = [self.tokenizer.apply_chat_template(prompt, tokenize=False) for prompt in prompts]
-
         inputs = self.tokenizer(prompt_texts, return_tensors="pt", padding=True, truncation=True).to(self.model.device)
 
         with torch.inference_mode():
             outputs = self.model.generate(
                 input_ids=inputs["input_ids"],
                 attention_mask=inputs["attention_mask"],
-                max_new_tokens=64,
+                max_new_tokens=self.config.MAX_NEW_TOKENS,
                 do_sample=True,
-                temperature=0.7,
+                temperature=self.config.TEMPERATURE,
                 pad_token_id=self.tokenizer.pad_token_id
             )
 
@@ -148,10 +208,10 @@ class REINFORCETrainer:
             all_rewards.append(func_rewards)
 
         rewards = list(zip(*all_rewards))
-        
         return torch.tensor(rewards, dtype=torch.float32).to(self.model.device)
 
     def update_model(self, batch, training_rewards):
+
         prompt = batch["prompt"]  
         prompts = [prompt]  
         
@@ -162,9 +222,9 @@ class REINFORCETrainer:
             output_ids = self.model.generate(
                 input_ids=inputs.input_ids,
                 attention_mask=inputs.attention_mask,
-                max_new_tokens=64,
+                max_new_tokens=self.config.MAX_NEW_TOKENS,
                 do_sample=True,
-                temperature=0.7,
+                temperature=self.config.TEMPERATURE,
                 pad_token_id=self.tokenizer.pad_token_id
             )
           
@@ -188,10 +248,12 @@ class REINFORCETrainer:
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+        
         return loss.item()
 
     def train(self):
-        for epoch in range(self.num_epochs):
+
+        for epoch in range(self.config.NUM_EPOCHS):
             epoch_loss = 0
             num_batches = 0
             accuracy_successes = []  
@@ -199,7 +261,6 @@ class REINFORCETrainer:
             for batch in tqdm(self.train_dataset, desc=f"Epoch {epoch+1}"):
 
                 rewards = self.compute_rewards(batch)
-
                 training_rewards = rewards.sum(dim=1)
 
                 loss = self.update_model(batch, training_rewards)
@@ -207,7 +268,6 @@ class REINFORCETrainer:
                     
                 avg_accuracy = rewards[:, 1].mean().item()
                 accuracy_successes.append(1 if avg_accuracy > 0 else 0)
-                    
                 num_batches += 1
                     
                 if num_batches % 5 == 0:
@@ -219,8 +279,8 @@ class REINFORCETrainer:
                     print(f"  Last 10 batches accuracy: {accuracy_rate:.1f}%")
 
                     print(f"\nReasoning Generation")
-                    test_batch = test_dataset[num_batches % len(test_dataset)]
-                    generated_text, inference_time, num_tokens = generate_with_reasoning(
+                    test_batch = self.test_dataset[num_batches % len(self.test_dataset)]
+                    generated_text, inference_time, num_tokens = reasoning_traces(
                         self.model, self.tokenizer, test_batch["prompt"]
                     )
                     print(f"Prompt: {test_batch['prompt']}")
@@ -231,42 +291,42 @@ class REINFORCETrainer:
                     torch.cuda.empty_cache()
                         
             total_accuracy = sum(accuracy_successes) / len(accuracy_successes) * 100 if accuracy_successes else 0
-            print(f"Epoch {epoch+1}/{self.num_epochs}, Loss: {epoch_loss:.4f}, Overall Accuracy: {total_accuracy:.1f}%")
+            print(f"Epoch {epoch+1}/{self.config.NUM_EPOCHS}, Loss: {epoch_loss:.4f}, Overall Accuracy: {total_accuracy:.1f}%")
         
         return self.model
 
-if __name__ == "__main__":
-    model_path = "/home/neuroali/pytorch_projects/pytorch_cuda_env/RL-LLM/Qwen2-0.5B-SFT-full"
-    print("Loading fine-tuned model...")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=torch.bfloat16,  
-        device_map="auto",          
-        trust_remote_code=True       
-    )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = model.to("cuda")
-    model = get_peft_model(model, lora_config)
-    tokenizer.padding_side = "left"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
 
+def save_trained_model(model, tokenizer, output_dir):
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    model.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
+
+
+
+def main():
+    
+    train_dataset, test_dataset = load_and_process_dataset()
+    
+    model, tokenizer = setup_model_and_tokenizer()
+    
     trainer = REINFORCETrainer(
         model=model,
         tokenizer=tokenizer,
         reward_funcs=[format_reward, accuracy_reward],
-        train_dataset=train_dataset,  
-        lr=1e-5,
-        batch_size=1,  
-        num_epochs=1
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        config=TrainingConfig()
     )
+
 
     trained_model = trainer.train()
     
-    output_dir = "/home/neuroali/pytorch_projects/pytorch_cuda_env/RL-LLM/Qwen2-0.5B-REINFORCE-trained"
-    print(f"Saving trained model to {output_dir}...")
+    save_trained_model(trained_model, tokenizer, TrainingConfig.OUTPUT_DIR)
     
-    trained_model.save_pretrained(output_dir)
-    
-    tokenizer.save_pretrained(output_dir)
+
+
+if __name__ == "__main__":
+    main()
