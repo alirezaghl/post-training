@@ -8,7 +8,7 @@ A two-stage training approach for fine-tuning Qwen-0.5B using supervised learnin
 
 ## References
 
-The reinforcement learning component leverages concepts from:
 - [Simple GRPO Repository](https://github.com/lsdefine/simple_GRPO)  
 - [System2 Sharif Course Assignment](https://sut-system2.github.io) 
+
 
