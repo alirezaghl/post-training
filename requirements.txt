@@ -1,0 +1,11 @@
+numpy>=1.21.0
+transformers>=4.21.0
+datasets>=2.0.0
+tokenizers>=0.13.0
+huggingface-hub>=0.16.0
+requests>=2.28.0
+tqdm>=4.64.0
+accelerate>=0.20.0
+trl>=0.7.0
+peft>=0.4.0
+math_verify
