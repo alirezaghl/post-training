@@ -9,6 +9,8 @@ A two-stage training approach for fine-tuning Qwen-0.5B using supervised learnin
 ## References
 
 - [Simple GRPO Repository](https://github.com/lsdefine/simple_GRPO)  
-- [System2 Sharif Course Assignment](https://sut-system2.github.io) 
+- [System2 Sharif Course Assignment](https://sut-system2.github.io)
+- [nano-aha-moment](https://github.com/McGill-NLP/nano-aha-moment/tree/main)
+
 
 
