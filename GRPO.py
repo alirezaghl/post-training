@@ -79,6 +79,7 @@ def load_and_process_dataset():
     
     return train_dataset, test_dataset
 
+# adapted: https://github.com/McGill-NLP/nano-aha-moment/blob/main/nano_r1_script.py
 class RolloutGenerator:
     def __init__(self, model, tokenizer, generations_per_sample=4):
         self.model = model
