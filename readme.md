@@ -1,4 +1,4 @@
-## Qwen-0.5B Fine-tuning with Supervised Learning and REINFORCE
+## Qwen-0.5B Fine-tuning with Supervised Learning and RL
 
 A two-stage training approach for fine-tuning Qwen-0.5B using supervised learning followed by reinforcement learning for enhanced test-time compute scaling.
 
@@ -11,6 +11,7 @@ A two-stage training approach for fine-tuning Qwen-0.5B using supervised learnin
 - [Simple GRPO Repository](https://github.com/lsdefine/simple_GRPO)  
 - [System2 Sharif Course Assignment](https://sut-system2.github.io)
 - [nano-aha-moment](https://github.com/McGill-NLP/nano-aha-moment/tree/main)
+
 
 
 
